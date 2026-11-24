@@ -418,7 +418,8 @@ const teamById=id=>S.teams.find(t=>t.id===id);
 const pname=p=>p.name||('('+p.role+')');
 const seedOf=id=>S.teams.findIndex(t=>t.id===id)+1;
 function playerById(pid){for(const t of S.teams){const p=t.players.find(x=>x.id===pid);if(p)return {p,team:t}}return null}
-function useGroups(){return S.format!=='elim'&&S.teams.length>=4}
+function fmtMode(){const n=S.teams.length;if(S.format==='elim')return 'elim';if(S.format==='rr')return n>=3?'rr':'elim';return n>=4?'groups':'elim'}
+function useGroups(){return fmtMode()==='groups'}
 function tagOf(id){return useGroups()?(S.grp[id]||''):String(seedOf(id))}
 function seedOrder(size){let o=[1];while(o.length<size){const n=o.length*2+1;o=o.flatMap(x=>[x,n-x])}return o}
 function needFor(bo){return Math.floor(bo/2)+1}
@@ -451,7 +452,7 @@ function resolve(m){
     }
   }else if(S.matches[m.id])delete S.matches[m.id];
 }
-function build(){return useGroups()?buildGroups():buildElim()}
+function build(){const m=fmtMode();return m==='groups'?buildGroups():m==='rr'?buildRR():buildElim()}
 
 function buildElim(){
   const n=S.teams.length;
@@ -486,7 +487,10 @@ function ensureGroups(){
   });
 }
 function rrRounds(ids){
-  const t=[...ids];if(t.length%2)t.push(null);
+  /* match 1 is always team 1 vs team 2, following the team list order */
+  if(ids.length===3)return [[[ids[0],ids[1]]],[[ids[1],ids[2]]],[[ids[2],ids[0]]]];
+  const odd=ids.length%2===1;
+  const t=ids.length<2?[...ids]:[ids[0],...ids.slice(2),...(odd?[null]:[]),ids[1]];
   const m=t.length,rounds=[];
   for(let r=0;r<m-1;r++){
     const pairs=[];
@@ -513,6 +517,30 @@ function groupTable(Gg){
 }
 function tbAdj(id,d){S.tb=S.tb||{};S.tb[id]=(S.tb[id]||0)+d;render()}
 
+function buildRR(){
+  const ids=S.teams.map(t=>t.id),rounds=rrRounds(ids),gbo=S.bo.group!=null?S.bo.group:1,fbo=S.bo.final!=null?S.bo.final:3;
+  const G={A:{g:'A',ids,rounds,matches:[]}};
+  const out={mode:'rr',G,slots:[],sf:[],fin:null,champ:null,all:[],nSlots:rounds.length,invalid:false};
+  let num=1;
+  rounds.forEach((pairs,s)=>{
+    const sl=[];
+    pairs.forEach((p,i)=>{
+      const m=mk('gAr'+s+'m'+i,p[0],p[1],'Round '+(s+1),gbo);
+      m.num=num++;m.grp='A';resolve(m);G.A.matches.push(m);sl.push(m);out.all.push(m);
+    });
+    out.slots.push(sl);
+  });
+  G.A.table=groupTable(G.A);
+  G.A.done=G.A.matches.length>0&&G.A.matches.every(m=>m.winner||m.ff==='both');
+  const T=G.A.table,done=G.A.done,top=new Set(done?[T[0].id,T[1].id]:[]),used=new Set();
+  const pick=i=>{const id=T[i].id,rp=S.rep&&S.rep['A'+(i+1)];
+    if(done&&rp&&teamById(rp)&&!top.has(rp)&&!used.has(rp)){used.add(rp);return rp}return id};
+  const fin=mk('pF',done?pick(0):null,done?pick(1):null,'Final',fbo);
+  fin.la='Round robin, 1st';fin.lb='Round robin, 2nd';
+  resolve(fin);fin.num=num++;
+  out.fin=fin;out.champ=fin.winner;out.all.push(fin);
+  return out;
+}
 function buildGroups(){
   ensureGroups();
   const gbo=S.bo.group!=null?S.bo.group:1;
@@ -645,10 +673,10 @@ function mvpTable(list,title,note){
 }
 function mvpSection(b){
   let h='<section class="sec"><h3>MVP race</h3><div class="two-col">';
-  if(b.mode==='groups')h+=mvpTable(mvpRace('group'),'Group stage MVP','No group stage games with stats yet.');
-  h+=mvpTable(mvpRace(b.mode==='groups'?'playoff':null),b.mode==='groups'?'Playoffs MVP':'Tournament MVP','No playoff games with stats yet.');
+  if(b.mode==='groups'||b.mode==='rr')h+=mvpTable(mvpRace('group'),b.mode==='rr'?'Round robin MVP':'Group stage MVP','No group stage games with stats yet.');
+  if(b.mode!=='rr')h+=mvpTable(mvpRace(b.mode==='groups'?'playoff':null),b.mode==='groups'?'Playoffs MVP':'Tournament MVP','No playoff games with stats yet.');
   h+='</div>';
-  const fin=b.mode==='groups'?b.fin:(b.rounds.length?b.rounds[b.rounds.length-1].ms[0]:null);
+  const fin=b.fin?b.fin:(b.rounds.length?b.rounds[b.rounds.length-1].ms[0]:null);
   const fm=fin&&finalMvp(fin);
   if(fm){
     let g=0,k=0,d=0,a=0,mv=0;const hs=[];
@@ -715,20 +743,22 @@ function champBanner(id){
 function viewBracket(){
   if(S.teams.length<2)return `<div class="page-h"><div><h2>Bracket</h2></div></div>`+emptyBracket();
   const b=build();
-  return b.mode==='groups'?viewGroups(b):viewElim(b);
+  return b.mode==='groups'?viewGroups(b):b.mode==='rr'?viewRR(b):viewElim(b);
 }
-function groupCard(b,g){
+function groupCard(b,g,title){
   const Gg=b.G[g];
-  return `<div class="card"><h4 class="ct">Group ${g}</h4><div class="tblwrap"><table class="tbl"><thead><tr><th></th><th>Team</th><th class="n">Played</th><th class="n">Won</th><th class="n">Lost</th></tr></thead><tbody>
+  return `<div class="card"><h4 class="ct">${title||'Group '+g}</h4><div class="tblwrap"><table class="tbl"><thead><tr><th></th><th>Team</th><th class="n">Played</th><th class="n">Won</th><th class="n">Lost</th></tr></thead><tbody>
   ${Gg.table.map((r,i)=>`<tr class="${i<2?'adv':''}"><td class="rk">${i+1}</td><td>${esc(teamById(r.id).name)}${Gg.done&&r.tied?` <span class="tag-tie">tied</span><span class="tbb"><button onclick="tbAdj('${r.id}',1)" aria-label="Rank higher">▲</button><button onclick="tbAdj('${r.id}',-1)" aria-label="Rank lower">▼</button></span>`:''}</td><td class="n">${r.p}</td><td class="n">${r.w}</td><td class="n">${r.l}</td></tr>`).join('')}
   </tbody></table></div>${Gg.done?repControls(b,g):''}<p class="note">The blue bar marks the two teams that advance. Ranked by wins, then head-to-head. If teams stay tied, play a tiebreaker game and press ▲ on the winner. Kills never decide a ranking.</p></div>`;
 }
 function repControls(b,g){
-  const top=new Set([...b.G.A.table.slice(0,2),...b.G.B.table.slice(0,2)].map(r=>r.id));
-  const opts=b.G.A.table.concat(b.G.B.table).filter(r=>!top.has(r.id)).map(r=>r.id);
+  const Gs=Object.entries(b.G),multi=Gs.length>1;
+  const top=new Set(Gs.flatMap(([k,G])=>G.table.slice(0,2)).map(r=>r.id));
+  const opts=Gs.flatMap(([k,G])=>G.table.map((r,i)=>({id:r.id,g:k,i}))).filter(o=>!top.has(o.id));
   if(!opts.length)return '';
+  const ord=i=>(i+1)+['st','nd','rd','th'][Math.min(i,3)];
   return [1,2].map(k=>{const cur=(S.rep&&S.rep[g+k])||'';
-    return `<div class="srow" style="margin-top:10px"><span>Replace ${k===1?'1st':'2nd'} place with</span><select aria-label="Replace ${k} place of group ${g}" onchange="setRep('${g+k}',this.value)"><option value="">No replacement</option>${opts.map(id=>`<option value="${id}" ${cur===id?'selected':''}>${esc(teamById(id).name)} (Group ${S.grp[id]}, ${b.G[S.grp[id]].table.findIndex(r=>r.id===id)+1}${['st','nd','rd','th'][Math.min(b.G[S.grp[id]].table.findIndex(r=>r.id===id),3)]})</option>`).join('')}</select></div>`}).join('')+'<p class="note">Use this when a qualified team cannot play. The replacement takes its semifinal slot and the old team is out of the playoffs.</p>';
+    return `<div class="srow" style="margin-top:10px"><span>Replace ${k===1?'1st':'2nd'} place with</span><select aria-label="Replace ${k} place of group ${g}" onchange="setRep('${g+k}',this.value)"><option value="">No replacement</option>${opts.map(o=>`<option value="${o.id}" ${cur===o.id?'selected':''}>${esc(teamById(o.id).name)} (${multi?'Group '+o.g+', ':''}${ord(o.i)})</option>`).join('')}</select></div>`}).join('')+`<p class="note">Use this when a qualified team cannot play. The replacement takes its ${multi?'semifinal':'final'} slot and the old team is out of the playoffs.</p>`;
 }
 function setRep(key,v){S.rep=S.rep||{};if(v)S.rep[key]=v;else delete S.rep[key];render()}
 function playoffBracket(b){
@@ -740,24 +770,37 @@ function playoffBracket(b){
     <div class="po-col">${matchCard(b.fin)}</div><div class="po-join1"></div>
     <div class="po-col">${champ}</div></div></div>`;
 }
-function placingsHtml(sf,fin){
+function placingsHtml(sf,fin,third){
   const lose=m=>m&&m.winner?(m.winner===m.a?m.b:m.a):null;
   const nm=id=>esc(teamById(id).name);
   const champ=fin&&fin.winner,ru=lose(fin);
-  const t3=(sf||[]).filter(m=>!m.ff).map(lose).filter(Boolean);
+  const t3=third||(sf||[]).filter(m=>!m.ff).map(lose).filter(Boolean);
   const fm=finalMvp(fin);
   const tm=playerStats().filter(x=>x.mvp>0).sort((a,b)=>b.mvp-a.mvp||b.kda-a.kda)[0];
-  const gmv=useGroups()?mvpRace('group').filter(x=>x.mvp>0)[0]:null;
+  const gmv=(useGroups()||fmtMode()==='rr')?mvpRace('group').filter(x=>x.mvp>0)[0]:null;
   const row=(cls,lab,val)=>`<div class="pl-row"><span class="medal ${cls}">${lab}</span><span>${val}</span></div>`;
   const tbd='<span class="mute">To be decided</span>';
   return `<section class="sec"><h3>Final placings</h3><div class="card placings">
     ${row('m1','1st place',champ?nm(champ):tbd)}
     ${row('m2','2nd place',ru?nm(ru):tbd)}
-    ${row('m3','3rd place',t3.length?t3.map(nm).join(' and ')+' <span class="mute">(shared)</span>':'<span class="mute">The semifinal losers share 3rd place. A team that forfeits does not place.</span>')}
+    ${row('m3','3rd place',t3.length?t3.map(nm).join(' and ')+(third?'':' <span class="mute">(shared)</span>'):third?tbd:'<span class="mute">The semifinal losers share 3rd place. A team that forfeits does not place.</span>')}
     ${fm?row('','Final MVP',`${esc(pname(fm.p))} <span class="mute">of ${esc(fm.team.name)}</span>`):''}
-    ${gmv?row('','Group stage MVP',`${esc(pname(gmv.p))} <span class="mute">of ${esc(gmv.team.name)}, ${gmv.mvp} winning MVPs</span>`):''}
+    ${gmv?row('',fmtMode()==='rr'?'Round robin MVP':'Group stage MVP',`${esc(pname(gmv.p))} <span class="mute">of ${esc(gmv.team.name)}, ${gmv.mvp} winning MVPs</span>`):''}
     ${tm?row('','Most winning MVPs',`${esc(pname(tm.p))} <span class="mute">of ${esc(tm.team.name)}, ${tm.mvp}</span>`):''}
   </div></section>`;
+}
+function viewRR(b){
+  const done=b.all.filter(m=>m.winner||m.ff==='both').length;
+  let h=`<div class="page-h"><div><h2>Bracket</h2><p class="sub">${done} of ${b.all.length} matches finished. Every team plays every other team once. The top 2 teams play the final.</p></div><div class="acts"><button class="btn ghost" onclick="shuffleSeeds()">Shuffle team order</button></div></div>`;
+  if(b.champ)h+=champBanner(b.champ);
+  const next=b.all.filter(m=>m.a&&m.b&&!m.winner&&m.ff!=='both').slice(0,3);
+  if(next.length)h+=`<section class="sec"><h3>Up next</h3><div class="mgrid">${next.map(m=>matchCard(m)).join('')}</div></section>`;
+  h+=`<section class="sec"><h3>Standings</h3>${groupCard(b,'A','Round robin standings')}</section>`;
+  h+=`<section class="sec"><h3>Final</h3><div class="mgrid">${matchCard(b.fin)}</div></section>`;
+  h+=`<section class="sec"><h3>Schedule</h3>${b.slots.map((sl,i)=>`<div class="slotrow"><div class="slotlab">Round ${i+1}</div><div class="mgrid">${sl.map(m=>matchCard(m)).join('')}</div></div>`).join('')}</section>`;
+  const T=b.G.A.table;
+  h+=placingsHtml([],b.fin,b.G.A.done&&b.fin.winner&&T[2]?[T[2].id]:[]);
+  return h;
 }
 function viewGroups(b){
   if(b.invalid)return `<div class="page-h"><div><h2>Bracket</h2></div></div><div class="card empty-card"><h3>Each group needs at least 2 teams</h3><p>Change a team's group on the Teams page, or draw groups at random.</p><div class="acts"><button class="btn" onclick="drawGroups()">Draw groups</button></div></div>`;
@@ -1083,7 +1126,7 @@ function teamCard(t,i,gm){
 }
 function viewTeams(){
   const gm=useGroups();
-  let h=`<div class="page-h"><div><h2>Teams</h2><p class="sub">${S.teams.length} team${S.teams.length===1?'':'s'}. ${gm?'Enter the real name and ML username of each player. Choose a group for each team, or draw groups at random. The list order sets the match order inside a group.':'The list order is the seeding. Seed 1 is the top seed.'}</p></div>
+  let h=`<div class="page-h"><div><h2>Teams</h2><p class="sub">${S.teams.length} team${S.teams.length===1?'':'s'}. ${gm?'Enter the real name and ML username of each player. Choose a group for each team, or draw groups at random. The list order sets the match order inside a group.':fmtMode()==='rr'?'Every team plays every other team once. The list order sets who plays in which round.':'The list order is the seeding. Seed 1 is the top seed.'}</p></div>
     <div class="acts">${gm?'<button class="btn ghost" onclick="drawGroups()">Draw groups</button>':''}<button class="btn" onclick="addTeam()">Add team</button></div></div>`;
   if(!S.teams.length)h+=`<div class="card empty-card"><h3>No teams yet</h3><p>Add your teams and their five players. Each team starts with one player per role.</p><div class="acts"><button class="btn" onclick="addTeam()">Add first team</button><button class="btn ghost" onclick="loadSample()">Load full sample</button></div></div>`;
   h+=`<div class="tgrid">${S.teams.map((t,i)=>teamCard(t,i,gm)).join('')}</div>`;
@@ -1200,11 +1243,12 @@ function gameRecs(){
 }
 function placingMap(b){
   const mp={};let fin,sf;
-  if(b.mode==='groups'){fin=b.fin;sf=b.sf}
+  if(b.fin){fin=b.fin;sf=b.sf||[]}
   else if(b.rounds.length>=2){fin=b.rounds[b.rounds.length-1].ms[0];sf=b.rounds[b.rounds.length-2].ms}
   else return mp;
   if(fin&&fin.winner){mp[fin.winner]='Champion';mp[fin.winner===fin.a?fin.b:fin.a]='Runner-up'}
   (sf||[]).forEach(m=>{if(m.winner&&!m.ff){const lo=m.winner===m.a?m.b:m.a;if(lo&&!mp[lo])mp[lo]='3rd place (shared)'}});
+  if(b.mode==='rr'&&fin&&fin.winner&&b.G.A.table[2]&&!mp[b.G.A.table[2].id])mp[b.G.A.table[2].id]='3rd place';
   return mp;
 }
 const sd=a=>{if(a.length<2)return 0;const m=a.reduce((x,y)=>x+y,0)/a.length;return Math.sqrt(a.reduce((x,y)=>x+(y-m)*(y-m),0)/a.length)};
@@ -1358,12 +1402,15 @@ async function changePass(){
 function viewSettings(){
   if(!EDIT)return `<div class="page-h"><div><h2>Settings</h2></div></div><div class="card empty-card"><h3>View only</h3><p>Only the organizer can change settings, teams and results. Everything you see here updates by itself while the organizer enters results.</p><button class="btn" onclick="openAuth()">Edit with passcode</button></div>`;
   const b=build();
-  let fmt=`<div class="card"><h3>Format</h3><p>${S.format!=='elim'&&S.teams.length<4?'Groups need at least 4 teams, so single elimination is used for now.':'Choose how teams play each other.'}</p>
-    <select aria-label="Format" onchange="setFormat(this.value)"><option value="groups" ${S.format!=='elim'?'selected':''}>Two groups, then playoffs</option><option value="elim" ${S.format==='elim'?'selected':''}>Single elimination</option></select></div>`;
+  let fmt=`<div class="card"><h3>Format</h3><p>${S.format==='rr'&&S.teams.length<3?'Round robin needs at least 3 teams, so single elimination is used for now.':S.format!=='elim'&&S.format!=='rr'&&S.teams.length<4?'Groups need at least 4 teams, so single elimination is used for now.':'Choose how teams play each other. Changing the format clears no teams but results may no longer fit.'}</p>
+    <select aria-label="Format" onchange="setFormat(this.value)"><option value="groups" ${S.format!=='elim'&&S.format!=='rr'?'selected':''}>Two groups, then playoffs</option><option value="rr" ${S.format==='rr'?'selected':''}>Round robin, top 2 play the final</option><option value="elim" ${S.format==='elim'?'selected':''}>Single elimination</option></select></div>`;
   let bo=`<div class="card"><h3>Best-of per stage</h3><p>Changing this can change who has already won.</p>`;
   if(b.mode==='groups'){
     bo+=`<div class="srow"><span>Group matches</span>${boSelect('group',S.bo.group!=null?S.bo.group:1,[1,3])}</div>
       <div class="srow"><span>Semifinals</span>${boSelect('sf',S.bo.sf!=null?S.bo.sf:1,[1,3,5])}</div>
+      <div class="srow"><span>Final</span>${boSelect('final',S.bo.final!=null?S.bo.final:3,[1,3,5])}</div>`;
+  }else if(b.mode==='rr'){
+    bo+=`<div class="srow"><span>Round robin matches</span>${boSelect('group',S.bo.group!=null?S.bo.group:1,[1,3])}</div>
       <div class="srow"><span>Final</span>${boSelect('final',S.bo.final!=null?S.bo.final:3,[1,3,5])}</div>`;
   }else if(b.rounds.length)b.rounds.forEach(rd=>{bo+=`<div class="srow"><span>${esc(rd.name)}</span>${boSelect(rd.r,rd.bo,[1,3,5,7])}</div>`});
   else bo+='<p>Add at least 2 teams first.</p>';
@@ -1371,7 +1418,7 @@ function viewSettings(){
   return `<div class="page-h"><div><h2>Settings</h2></div></div><div class="sgrid">
     <div class="card"><h3>Tournament name</h3><p>The name and the line under it are shown at the top of every page.</p><div class="srow"><input style="width:100%" aria-label="Tournament name" value="${esc(S.title)}" oninput="S.title=this.value;$('title').textContent=this.value||'OMSU Siglakas 2026';save()"></div><input style="width:100%" aria-label="Event line" value="${esc(S.sub||'')}" oninput="S.sub=this.value;$('sub').textContent=this.value;$('sub').hidden=!this.value;save()"></div>
     ${fmt}${bo}
-    <div class="card"><h3>${b.mode==='groups'?'Groups':'Seeding'}</h3><p>${b.mode==='groups'?'Split the teams into Group A and Group B at random.':'Draw random seeds. Top seeds get the byes.'}</p><button class="btn ghost" onclick="${b.mode==='groups'?'drawGroups()':'shuffleSeeds()'}">${b.mode==='groups'?'Draw groups':'Draw seeds'}</button></div>
+    <div class="card"><h3>${b.mode==='groups'?'Groups':b.mode==='rr'?'Team order':'Seeding'}</h3><p>${b.mode==='groups'?'Split the teams into Group A and Group B at random.':b.mode==='rr'?'Shuffle the team order. This changes who plays in which round.':'Draw random seeds. Top seeds get the byes.'}</p><button class="btn ghost" onclick="${b.mode==='groups'?'drawGroups()':'shuffleSeeds()'}">${b.mode==='groups'?'Draw groups':b.mode==='rr'?'Shuffle team order':'Draw seeds'}</button></div>
     <div class="card"><h3>Online saving</h3><p>Everything you change is saved online and shown live to everyone who opens this page. Viewers cannot change anything.</p><div class="srow"><input id="pw-old" type="password" placeholder="Current passcode" autocomplete="off"></div><div class="srow"><input id="pw-new" type="password" placeholder="New passcode, at least 6 characters" autocomplete="off"></div><button class="btn ghost" onclick="changePass()">Change passcode</button></div>
     <div class="card"><h3>Backup and print</h3><p>Everything is saved in this browser on this computer. Export a backup to be safe.</p>
       <div class="acts"><button class="btn" onclick="exportData()">Export backup</button><label class="btn ghost ed">Import backup<input type="file" accept=".json" style="display:none" onchange="importData(this)"></label><button class="btn ghost" onclick="window.print()">Print</button></div></div>
